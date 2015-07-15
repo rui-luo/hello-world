@@ -1,0 +1,120 @@
+#!/usr/bin/perl
+
+$file_name = "sar_BO_small.csv";
+
+system("less $file_name > aaa");
+
+open (INFILE, "aaa");
+
+while (<INFILE>) {
+  chop;
+  @tmp = split(",");
+  @dat = split(",",$_,3);
+  $hash{ $tmp[1] } = $dat[2]; 
+}
+
+close(INFILE);
+
+$hash{ "time" } = $hash{ "timeStamp" };
+$hash{ "time" } = "WEB1_CPU,APP1_CPU,CM_CPU,DB1_CPU";
+
+$file_name = "iostat_BO2.csv";
+
+system("less $file_name > aaa");
+open(OUTPUT_FILE, "> BO.csv");
+
+open (INFILE, "aaa");
+
+while (<INFILE>) {
+  chop;
+  @tmp = split(",");
+  $size = @tmp-1;
+  if ($tmp[1] == "time")
+  {
+	for ($i = 0;$i < $size; $i++)
+	{
+       	     	if($i > 1)
+		{
+		   printf(OUTPUT_FILE "$tmp[$i]_disk,");
+  	  	}
+	        else
+                {
+                   printf(OUTPUT_FILE "$tmp[$i],");
+                }
+ 	}
+
+  }
+  else
+  {
+  	for ($i = 0;$i < $size; $i++) 
+ 	{
+		printf(OUTPUT_FILE "$tmp[$i],");
+  	}
+  }
+  print(OUTPUT_FILE "$hash{$tmp[1]}\n");
+}
+
+close(OUTPUTFILE);
+close(INFILE);
+
+system("rm aaa");
+
+$file_name = "sar_RW_small.csv";
+
+system("less $file_name > aaa");
+
+open (INFILE, "aaa");
+
+while (<INFILE>) {
+  chop;
+  @tmp = split(",");
+  @dat = split(",",$_,3);
+  $hash{ $tmp[1] } = $dat[2];
+}
+
+close(INFILE);
+
+$hash{ "time" } = $hash{ "timeStamp" };
+$hash{ "time" } = "WEB1_CPU,APP1_CPU,CM_CPU,DB1_CPU";
+
+$file_name = "iostat_RW2.csv";
+
+system("less $file_name > aaa");
+open(OUTPUT_FILE, "> RW.csv");
+
+open (INFILE, "aaa");
+
+while (<INFILE>) {
+  chop;
+  @tmp = split(",");
+  $size = @tmp-1;
+  if ($tmp[1] == "time")
+  {
+        for ($i = 0;$i < $size; $i++)
+        {
+                if($i > 1)
+                {
+                   printf(OUTPUT_FILE "$tmp[$i]_disk,");
+                }
+                else
+                {
+                   printf(OUTPUT_FILE "$tmp[$i],");
+                }
+        }
+
+  }
+  else
+  {
+        for ($i = 0;$i < $size; $i++)
+        {
+                printf(OUTPUT_FILE "$tmp[$i],");
+        }
+  }
+  print(OUTPUT_FILE "$hash{$tmp[1]}\n");
+}
+
+
+close(OUTPUTFILE);
+close(INFILE);
+
+system("rm aaa");

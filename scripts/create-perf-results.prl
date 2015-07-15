@@ -1,0 +1,181 @@
+#!/usr/bin/perl
+
+# Setting for summer-time
+#
+# 0: Not summer-time
+# 1: Summer-time
+# 2: Auto-detect (This option assumes summer-time at the first trial.
+#                 If it fails, then it tries non-summer-time next.)
+$summer_time = 2;
+
+
+print("Config, DBConfig, Policy, Mix, WL, RT, TP, TotalReq, OverReq, UnderReq, SLOSat, SLOTP\n");
+@servers = ("web_server", "servlets_server", "cjdbc_server", "db_server");
+@prefixs = ("WEB", "APP", "CJDBC", "DB");
+
+$borw = 0;
+
+open (FILE_LIST, "fileList");
+while (<FILE_LIST>) {
+chop;
+$file_name = $_;
+
+
+system("grep \"Average throughput\" $file_name/200*/perf.html | grep -v Error | grep ms > $file_name/aaa");
+
+open (INFILE, "$file_name/aaa");
+
+$count = 0;
+$bo_rw = 0;
+$index = 0;
+$bo_index = 0;
+LINE: while (<INFILE>) {
+  $count++;
+  if ($count != 2) {
+    if ($count == 4) {
+      $count = 0;
+    }
+    next LINE;
+  }
+
+  chop;
+  @bbb = split("B>");
+  @tmp = split(" ms", $bbb[9]);
+  $rt = $tmp[0];
+  @tmp = split(" req", $bbb[13]);
+  $tp = $tmp[0];
+  #print("$rt\n$tp\n");
+  if ($bo_rw == 0) {
+    $rt_bo[$index] = $rt;
+    $tp_bo[$index] = $tp;
+    $bo_rw++;
+    $bo_index++;
+  }
+  else {
+    #print("\n");
+    $rt_rw[$index] = $rt;
+    $tp_rw[$index] = $tp;
+    $index++;
+    $bo_rw = 0;
+  }
+}
+
+close(INFILE);
+system("\rm $file_name/aaa");
+
+
+
+system("ls -d $file_name/20* | grep -v '.tgz' > $file_name/tmp-dirlist");
+open (DIR_LIST, "$file_name/tmp-dirlist");
+$dir_index = 0;
+$wl_index = 0;
+while (<DIR_LIST>) {
+  chop;
+  $dir_name = $_;
+
+  #### Get length of up_ramp & session_run. Get the number of workload. ####
+  open(INDEX_FILE, "$dir_name/index.html");
+  LINE: foreach $line (<INDEX_FILE>) {
+    if ($line =~ "Up ramp time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $up_ramp_time = substr($line, 33);
+      $up_ramp_time /= 1000;
+    }
+    elsif ($line =~ "Session run time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $run_time = substr($line, 33);
+      $run_time /= 1000;
+    }
+    elsif ($line =~ "Total number of clients for this experiment") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $wload = substr($line, 45);
+      last(LINE);
+    }
+  }
+  close(INDEX_FILE);
+#  print("dir = $dir_name, workload = $wload\t");
+system("\rm $file_name/aaa");
+system("grep $dir_name/stat_client* -e \"<TR><TD>StoriesOfTheDay</TD><TD>\" > $file_name/aaa");
+
+open (INFILE, "$file_name/aaa");
+
+$limit = $ARGV[$0];
+$count = 0;
+$total = 0;
+$index = 0;
+$over = 0;
+$under = 0;
+$bo_index = 0;
+LINE: while (<INFILE>) {
+  $count++;
+  if( $count != 2) {
+        next LINE;
+  }
+  chop;
+  @bbb = split("<TR><TD>");
+  $bbb = @bbb;
+  for ($ct = 1; $ct < $bbb; $ct++) {
+        @tmp = split("</TD><TD>", $bbb[$ct]);
+        # print("\n$tmp[0]\t");
+        @tmp1 = split("</TD></TR>", $tmp[1]);
+        # print("$tmp1[0]\t$ct\n");
+        # my %rt = ();
+        # $rt{ $tmp[1] } = ($tmp1[0] + $rt{ $tmp[1] })/2;
+        # print( "\n$rt{ $tmp[1] }");
+        if ($tmp1[0] > $limit) {
+                $over++;
+        }
+        else {
+                $under++;
+        }
+  }
+  $count = -2;
+}
+$total = $under  + $over;
+@X1 = split("Junhee", $dir_name);
+@X2 = split("/", $X1[1]);
+@X3 = split("_", $X2[0]);
+if ( $borw++ == 0){
+	$XX = "BO";
+	$RT = $rt_bo[$wl_index];
+	$TP = $tp_bo[$wl_index];
+}
+else {
+	$XX = "RW";
+	$borw = 0;
+	$RT = $rt_rw[$wl_index];
+        $TP = $tp_rw[$wl_index];
+	$wl_index++;
+}
+
+if ($total == 0){
+	$SLO = "ERROR";
+	$SLOTP = "ERROR";
+}
+else {
+	$SLO = $under / $total;
+	$SLOTP = $SLO * $TP; 
+}
+
+print("$X3[1]$X3[2]$X3[3], $X3[4], $X3[5], $XX, $wload, $RT, $TP, $total, $over, $under, $SLO, $SLOTP\n");
+
+close(INFILE);
+
+
+system("\rm $file_name/aaa");
+
+
+
+
+  $dir_index++;
+}
+close(DIR_LIST);
+
+system("rm $file_name/tmp-dirlist");
+}

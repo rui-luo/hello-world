@@ -1,0 +1,228 @@
+#!/usr/bin/perl
+
+# Setting for summer-time
+#
+# 0: Not summer-time
+# 1: Summer-time
+# 2: Auto-detect (This option assumes summer-time at the first trial.
+#                 If it fails, then it tries non-summer-time next.)
+$summer_time = 2;
+
+
+system("rm tmp-dirlist");
+system("ls -d 20* > tmp-dirlist");
+open (DIR_LIST, "tmp-dirlist");
+$dir_index = 0;
+while (<DIR_LIST>) {
+  chop;
+  $dir_name = $_;
+
+  #### Get length of up_ramp & session_run. Get the number of workload. ####
+  open(INDEX_FILE, "$dir_name/index.html");
+  LINE: foreach $line (<INDEX_FILE>) {
+    if ($line =~ "Up ramp time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $up_ramp_time = substr($line, 33);
+      $up_ramp_time /= 1000;
+    }
+    elsif ($line =~ "Session run time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $run_time = substr($line, 33);
+      $run_time /= 1000;
+    }
+    elsif ($line =~ "Total number of clients for this experiment") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $workload = substr($line, 45);
+      last(LINE);
+    }
+  }
+  close(INDEX_FILE);
+  print("dir = $dir_name, up_ramp_time = $up_ramp_time, run_time = $run_time, workload = $workload\n");
+  $workload[$dir_index] = $workload;
+
+  #### Get start & end time ####
+  @perf_files = ("perf.html", "stat_client0.html", "stat_client1.html", "stat_client2.html",
+		 "stat_client3.html", "stat_client4.html");
+ EXTRACT_START_TIME: foreach $perf_file (@perf_files) {
+    $found = 0;
+    open(PERF_FILE, "$dir_name/$perf_file");
+  LINE: foreach $line (<PERF_FILE>) {
+      if ($line =~ "Runtime session start") {
+	$found++;
+	$start_time = substr($line, 40, 19);
+	$st_YYYY = substr($start_time, 0, 4);
+	$st_MM = substr($start_time, 5, 2);
+	$st_DD = substr($start_time, 8, 2);
+	$st_hh = substr($start_time, 11, 2);
+	$st_mm = substr($start_time, 14, 2);
+	$st_ss = substr($start_time, 17, 2);
+      }
+      elsif ($line =~ "Down ramp start") {
+	$found++;
+	$end_time = substr($line, 34, 19);
+	$et_YYYY = substr($end_time, 0, 4);
+	$et_MM = substr($end_time, 5, 2);
+	$et_DD = substr($end_time, 8, 2);
+	$et_hh = substr($end_time, 11, 2);
+	$et_mm = substr($end_time, 14, 2);
+	$et_ss = substr($end_time, 17, 2);
+	last(LINE);
+      }
+    }
+    close(PERF_FILE);
+    if ($found == 2) {
+      last(EXTRACT_START_TIME);
+    }
+  }
+  print(" start = $st_YYYY/$st_MM/$st_DD $st_hh:$st_mm:$st_ss, ");
+  print("end = $et_YYYY/$et_MM/$et_DD $et_hh:$et_mm:$et_ss\n");
+
+  # Set a variable for summer-time
+  $tmp_summer_time = $summer_time;
+  if ($summer_time == 2) {
+    $tmp_summer_time = 1;
+  }
+
+ RETRY_SUMMER_TIME:
+  #### Process log files of MYSQL ####
+  $start4MYSQL = sprintf("%2.2d:%2.2d:%2.2d", $st_hh + $tmp_summer_time, $st_mm, $st_ss);
+  if (($st_hh eq "23") && ($tmp_summer_time == 1)) {
+    $start4MYSQL = sprintf("00:%2.2d:%2.2d", $st_mm, $st_ss);
+  }
+  print("start4MYSQL = $start4MYSQL\n");
+  $end4MYSQL = sprintf("%2.2d:%2.2d:%2.2d", $et_hh + $tmp_summer_time, $et_mm, $et_ss);
+  if (($et_hh eq "23") && ($tmp_summer_time == 1)) {
+    $end4MYSQL = sprintf("00:%2.2d:%2.2d", $et_mm, $et_ss);
+  }
+  print("end4MYSQL = $end4MYSQL\n");
+  system("rm tmp-filelist");
+
+  system("ls -d $dir_name/iostat-node12* > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  foreach $log_name (<LOG_LIST>) {
+    chop($log_name);
+    open(LOG_FILE, "$log_name");
+    $row_index = 0;
+    $mode = 0;
+
+    # Check first time
+    <LOG_FILE>;
+    <LOG_FILE>;
+    $line = <LOG_FILE>;
+    chop($line);
+    @parts = split(" ", $line);
+    if ($parts[1] ge $start4MYSQL) {
+      $mode = 1;
+    }
+
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4MYSQL)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4MYSQL)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ "da")) {
+	chop($line);
+	@parts = split(" ", $line);
+	$avgqu[$dir_index][$row_index] = $parts[8];
+        $wait_inqu[$dir_index][$row_index] = $parts[9] - $parts[10];
+	$util[$dir_index][$row_index] = $parts[11];
+	$row_index++;
+      }
+      if (($mode == 1) && ($line =~ "Time")) {
+	chop($line);
+	@parts = split(" ", $line);
+	$time = $parts[1];
+      }
+    }
+    close(LOG_FILE);
+    # Check whether the summer-time setting is correct or not
+    if (($mode == 0) && ($summer_time == 2) && ($tmp_summer_time == 1)) {
+      print("It looks like it was not executed during summer-time period.: dir_name = $dir_name\n");
+      $tmp_summer_time = 0;
+      close(LOG_LIST);
+      goto(RETRY_SUMMER_TIME);
+    }
+  }
+  close(LOG_LIST);
+
+  $dir_index++;
+}
+close(DIR_LIST);
+system("rm tmp-dirlist");
+
+
+# Print
+open(OUTPUT_FILE,  "> iostat_BO_small.csv");
+open(OUTPUT_FILE2, "> iostat_RW_small.csv");
+print(OUTPUT_FILE "workload,avg-queue-size,(await)-(svctm),Disk I/O util\n");
+print(OUTPUT_FILE2 "workload,avg-queue-size,(await)-(svctm),Disk I/O util\n");
+for ($i = 0; $i < $dir_index; $i++) {
+  if (($i % 2) == 0) {
+    for ($j = 0; $j <= $run_time; $j++) {
+      if ($avgqu[$i][$j] ne "") {
+	print(OUTPUT_FILE "$workload[$i],$avgqu[$i][$j],$wait_inqu[$i][$j],$util[$i][$j]\n");
+      }
+    }
+  }
+  else {
+    for ($j = 0; $j <= $run_time; $j++) {
+      if ($avgqu[$i][$j] ne "") {
+	print(OUTPUT_FILE2 "$workload[$i],$avgqu[$i][$j],$wait_inqu[$i][$j],$util[$i][$j]\n");
+      }
+    }
+  }
+}
+close(OUTPUT_FILE);
+close(OUTPUT_FILE2);
+
+
+
+
+sub change_monthname {
+  local($MM) = @_;
+  if ($MM eq "01") {
+    return("Jan");
+  }
+  elsif ($MM eq "02") {
+    return("Feb");
+  }
+  elsif ($MM eq "03") {
+    return("Mar");
+  }
+  elsif ($MM eq "04") {
+    return("Apr");
+  }
+  elsif ($MM eq "05") {
+    return("May");
+  }
+  elsif ($MM eq "06") {
+    return("Jun");
+  }
+  elsif ($MM eq "07") {
+    return("Jul");
+  }
+  elsif ($MM eq "08") {
+    return("Aug");
+  }
+  elsif ($MM eq "09") {
+    return("Sep");
+  }
+  elsif ($MM eq "10") {
+    return("Oct");
+  }
+  elsif ($MM eq "11") {
+    return("Nov");
+  }
+  elsif ($MM eq "12") {
+    return("Dec");
+  }
+  return($MM);
+}

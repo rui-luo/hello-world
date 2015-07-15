@@ -1,0 +1,68 @@
+#!/usr/bin/perl
+
+system("\rm aaa");
+system("grep \"Average throughput\" 20*/perf.html | grep -v Error | grep ms > aaa");
+
+open (INFILE, "aaa");
+
+$count = 0;
+$bo_rw = 0;
+$index = 0;
+$bo_index = 0;
+LINE: while (<INFILE>) {
+  $count++;
+  if ($count != 2) {
+    if ($count == 4) {
+      $count = 0;
+    }
+    next LINE;
+  }
+
+  chop;
+  @bbb = split("B>");
+  @tmp = split(" ms", $bbb[9]);
+  $rt = $tmp[0];
+  @tmp = split(" req", $bbb[13]);
+  $tp = $tmp[0];
+  #print("$rt\n$tp\n");
+  if ($bo_rw == 0) {
+    $rt_bo[$index] = $rt;
+    $tp_bo[$index] = $tp;
+    $bo_rw++;
+    $bo_index++;
+  }
+  else {
+    #print("\n");
+    $rt_rw[$index] = $rt;
+    $tp_rw[$index] = $tp;
+    $index++;
+    $bo_rw = 0;
+  }
+}
+
+close(INFILE);
+
+if ($count != 0) {
+  print("\n!!!ERROR: \$count != 0\n");
+}
+
+print("\nRT(BO)");
+for ($i = 0; $i < $bo_index; $i++) {
+  printf(" %d", $rt_bo[$i]);
+}
+print("\nTP(BO)");
+for ($i = 0; $i < $bo_index; $i++) {
+  printf(" %d", $tp_bo[$i]);
+}
+print("\nRT(R/W)");
+for ($i = 0; $i < $index; $i++) {
+  printf(" %d", $rt_rw[$i]);
+}
+print("\nTP(R/W)");
+for ($i = 0; $i < $index; $i++) {
+  printf(" %d", $tp_rw[$i]);
+}
+print("\n\n");
+
+
+#system("\rm aaa");

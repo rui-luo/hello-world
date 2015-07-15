@@ -1,0 +1,662 @@
+#!/usr/bin/perl
+
+# Setting for summer-time
+#
+# 0: Not summer-time
+# 1: Summer-time
+# 2: Auto-detect (This option assumes summer-time at the first trial.
+#                 If it fails, then it tries non-summer-time next.)
+$summer_time = 2;
+
+
+$tomcat_sampling_ratio = 20;
+$cjdbc_sampling_ratio = 20;
+$mysql_sampling_ratio = 20;
+if ($#ARGV >= 2) {
+  $tomcat_sampling_ratio = $ARGV[0];
+  $cjdbc_sampling_ratio = $ARGV[1];
+  $mysql_sampling_ratio = $ARGV[2];
+  print("tomcat_sampling_ratio = $tomcat_sampling_ratio\n");
+  print("cjdbc_sampling_ratio  = $cjdbc_sampling_ratio\n");
+  print("mysql_sampling_ratio  = $mysql_sampling_ratio\n");
+} 
+elsif ($#ARGV = 1) {
+  $tomcat_sampling_ratio = $ARGV[0];
+  $mysql_sampling_ratio = $ARGV[1];
+  print("tomcat_sampling_ratio = $tomcat_sampling_ratio\n");
+  print("mysql_sampling_ratio  = $mysql_sampling_ratio\n");
+}
+
+
+system("rm tmp-dirlist");
+system("ls -d 20* > tmp-dirlist");
+open (DIR_LIST, "tmp-dirlist");
+$dir_index = 0;
+while (<DIR_LIST>) {
+  chop;
+  $dir_name = $_;
+
+  #### Get start & end time ####
+  open(PERF_FILE, "$dir_name/perf.html");
+  LINE: foreach $line (<PERF_FILE>) {
+    if ($line =~ "Runtime session start") {
+      $start_time = substr($line, 40, 19);
+      $st_YYYY = substr($start_time, 0, 4);
+      $st_MM = substr($start_time, 5, 2);
+      $st_DD = substr($start_time, 8, 2);
+      $st_hh = substr($start_time, 11, 2);
+      $st_mm = substr($start_time, 14, 2);
+      $st_ss = substr($start_time, 17, 2);
+    }
+    elsif ($line =~ "Down ramp start") {
+      $end_time = substr($line, 34, 19);
+      $et_YYYY = substr($end_time, 0, 4);
+      $et_MM = substr($end_time, 5, 2);
+      $et_DD = substr($end_time, 8, 2);
+      $et_hh = substr($end_time, 11, 2);
+      $et_mm = substr($end_time, 14, 2);
+      $et_ss = substr($end_time, 17, 2);
+      last(LINE);
+    }
+  }
+  close(PERF_FILE);
+  print("dir = $dir_name, start = $st_YYYY/$st_MM/$st_DD $st_hh:$st_mm:$st_ss, ");
+  print("end = $et_YYYY/$et_MM/$et_DD $et_hh:$et_mm:$et_ss\n");
+
+  # Set a variable for summer-time
+  $tmp_summer_time = $summer_time;
+  if ($summer_time == 2) {
+    $tmp_summer_time = 1;
+  }
+
+ RETRY_SUMMER_TIME1:
+  #### Process log files of HTTPD ####
+  $start4HTTPD = sprintf("%2.2d:%2.2d:%2.2d", $st_hh + $tmp_summer_time, $st_mm, $st_ss);
+  if (($st_hh eq "23") && ($tmp_summer_time == 1)) {
+    $start4HTTPD = sprintf("00:%2.2d:%2.2d", $st_mm, $st_ss);
+  }
+  print("start4HTTPD = $start4HTTPD\n");
+  $end4HTTPD = sprintf("%2.2d:%2.2d:%2.2d", $et_hh + $tmp_summer_time, $et_mm, $et_ss);
+  if (($et_hh eq "23") && ($tmp_summer_time == 1)) {
+    $end4HTTPD = sprintf("00:%2.2d:%2.2d", $et_mm, $et_ss);
+  }
+  print("end4HTTPD = $end4HTTPD\n");
+  system("rm tmp-filelist");
+  system("ls -d $dir_name/HTTPD*.log.gz > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  $count_httpd[$dir_index] = 0;
+  $totalDT_httpd = 0;
+  foreach $log_name (<LOG_LIST>) {
+    chop($log_name);
+    print("Before expanding: log_name = $log_name\n");
+    system("gzip -d $log_name");
+    chop($log_name);
+    chop($log_name);
+    chop($log_name);
+    print("After expanding: log_name = $log_name\n");
+    open(LOG_FILE, "$log_name");
+    $mode = 0;
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4HTTPD)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4HTTPD)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ "GET /rubbos/servlet/edu.rice.rubbos.servlets.")) {
+	@parts = split(" ", $line);
+	$tmp_rt = $parts[10];
+	$totalDT_httpd += $tmp_rt;
+	$count_httpd[$dir_index]++;
+      }
+      elsif (($mode == 1) && ($line =~ "GET ")) {
+	@parts = split(" ", $line);
+	$tmp_rt = $parts[10];
+	$totalDT_httpd += $tmp_rt;
+      }
+    }
+    close(LOG_FILE);
+    print("Before compressing: log_name = $log_name\n");
+    system("gzip $log_name");
+    print("After compressing: log_name = $log_name\n");
+    # Check whether the summer-time setting is correct or not
+    if (($mode == 0) && ($summer_time == 2) && ($tmp_summer_time == 1)) {
+      print("It looks like it was not executed during summer-time period.: log_name = $log_name\n");
+      $tmp_summer_time = 0;
+      close(LOG_LIST);
+      goto(RETRY_SUMMER_TIME1);
+    }
+  }
+  close(LOG_LIST);
+
+  print("\n");
+  print("count_httpd = $count_httpd[$dir_index]\n");
+  if ($count_httpd[$dir_index] == 0) {
+    $dir_index++;
+    next;
+  }
+  $avgDT_httpd[$dir_index] = $totalDT_httpd / $count_httpd[$dir_index] / 1000;
+  printf("avgDT_httpd = %.3f(ms)\n\n", $avgDT_httpd[$dir_index]);
+
+
+  #### Process log files of TOMCAT ####
+  $start4TOMCAT = sprintf("%4.4d/%2.2d/%2.2d %2.2d:%2.2d:%2.2d",
+			  $st_YYYY, $st_MM, $st_DD, $st_hh, $st_mm, $st_ss);
+  print("start4TOMCAT = $start4TOMCAT\n");
+  $end4TOMCAT = sprintf("%4.4d/%2.2d/%2.2d %2.2d:%2.2d:%2.2d",
+			$st_YYYY, $et_MM, $et_DD, $et_hh, $et_mm, $et_ss);
+  print("end4TOMCAT = $end4TOMCAT\n");
+  system("rm tmp-filelist");
+  system("ls -d $dir_name/TOMCAT*.log.gz > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  $count_tomcat[$dir_index] = 0;
+  $totalDT_tomcat = 0;
+  foreach $log_name (<LOG_LIST>) {
+    chop($log_name);
+    print("Before expanding: log_name = $log_name\n");
+    system("gzip -d $log_name");
+    chop($log_name);
+    chop($log_name);
+    chop($log_name);
+    print("After expanding: log_name = $log_name\n");
+    open(LOG_FILE, "$log_name");
+    $mode = 0;
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4TOMCAT)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4TOMCAT)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ "ThreaD:") &&
+	  ($line =~ "/rubbos/servlet/edu.rice.rubbos.servlets.")) {
+	@parts = split(" ", $line);
+	$tmp_rt = $parts[4];
+	$totalDT_tomcat += $tmp_rt;
+	$count_tomcat[$dir_index]++;
+      }
+    }
+    close(LOG_FILE);
+    print("Before compressing: log_name = $log_name\n");
+    system("gzip $log_name");
+    print("After compressing: log_name = $log_name\n");
+  }
+  close(LOG_LIST);
+
+  print("\n");
+  $count_tomcat[$dir_index] *= int(100 / $tomcat_sampling_ratio);
+  print("count_tomcat = $count_tomcat[$dir_index]\n");
+  $avgCount_tomcat = $count_tomcat[$dir_index] / $count_httpd[$dir_index];
+  printf("avgCount_tomcat = %.2f\n", $avgCount_tomcat);
+  $avgDT_tomcat[$dir_index] =
+   $totalDT_tomcat * int(100 / $tomcat_sampling_ratio) / $count_httpd[$dir_index] / 1000;
+  printf("avgDT_tomcat = %.3f(ms)\n\n", $avgDT_tomcat[$dir_index]);
+
+
+  # Reset a variable for summer-time
+  $tmp_summer_time = $summer_time;
+  if ($summer_time == 2) {
+    $tmp_summer_time = 1;
+  }
+
+ RETRY_SUMMER_TIME2:
+  #### Process log files of MYSQL ####
+  $start4MYSQL = sprintf("%2.2d:%2.2d:%2.2d", $st_hh + $tmp_summer_time, $st_mm, $st_ss);
+  if (($st_hh eq "23") && ($tmp_summer_time == 1)) {
+    $start4MYSQL = sprintf("00:%2.2d:%2.2d", $st_mm, $st_ss);
+  }
+  print("start4MYSQL = $start4MYSQL\n");
+  $end4MYSQL = sprintf("%2.2d:%2.2d:%2.2d", $et_hh + $tmp_summer_time, $et_mm, $et_ss);
+  if (($et_hh eq "23") && ($tmp_summer_time == 1)) {
+    $end4MYSQL = sprintf("00:%2.2d:%2.2d", $et_mm, $et_ss);
+  }
+  print("end4MYSQL = $end4MYSQL\n");
+  system("rm tmp-filelist");
+  system("ls -d $dir_name/MYSQL*.log.gz > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  $count_mysql_read[$dir_index] = 0;
+  $count_mysql_write[$dir_index] = 0;
+  $count_mysql_others[$dir_index] = 0;
+  $totalDT_mysql_read = 0;
+  $totalDT_mysql_write = 0;
+  $totalDT_mysql_others = 0;
+  $num_servers_mysql = 0;
+  foreach $log_name (<LOG_LIST>) {
+    $num_servers_mysql++;
+    chop($log_name);
+    print("Before expanding: log_name = $log_name\n");
+    system("gzip -d $log_name");
+    chop($log_name);
+    chop($log_name);
+    chop($log_name);
+    print("After expanding: log_name = $log_name\n");
+    open(LOG_FILE, "$log_name");
+    $mode = 0;
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4MYSQL)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4MYSQL)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ "RT=")) {
+	@parts = split(" ", $line);
+	$tmp_rt = $parts[4];
+	if ($parts[8] eq "SELECT") {
+	  $totalDT_mysql_read += $tmp_rt;
+	  $count_mysql_read[$dir_index]++;
+	}
+	elsif (($parts[8] eq "INSERT") || ($parts[8] eq "DELETE") || ($parts[8] eq "UPDATE")) {
+	  $totalDT_mysql_write += $tmp_rt;
+	  $count_mysql_write[$dir_index]++;
+	}
+	else {
+	  $totalDT_mysql_others += $tmp_rt;
+	  $count_mysql_others[$dir_index]++;
+	}
+      }
+    }
+    close(LOG_FILE);
+    print("Before compressing: log_name = $log_name\n");
+    system("gzip $log_name");
+    print("After compressing: log_name = $log_name\n");
+    # Check whether the summer-time setting is correct or not
+    if (($mode == 0) && ($summer_time == 2) && ($tmp_summer_time == 1)) {
+      print("It looks like it was not executed during summer-time period.: log_name = $log_name\n");
+      $tmp_summer_time = 0;
+      close(LOG_LIST);
+      goto(RETRY_SUMMER_TIME2);
+    }
+  }
+  close(LOG_LIST);
+
+  if ($count_mysql_read[$dir_index] == 0) {
+    $avgRT_mysql_read[$dir_index] = 0;
+  }
+  else {
+    $avgRT_mysql_read[$dir_index] = $totalDT_mysql_read / $count_mysql_read[$dir_index] / 10000;
+  }
+  if ($count_mysql_write[$dir_index] == 0) {
+    $avgRT_mysql_write[$dir_index] = 0;
+  }
+  else {
+    $avgRT_mysql_write[$dir_index] = $totalDT_mysql_write / $count_mysql_write[$dir_index] / 10000;
+  }
+  if ($count_mysql_others[$dir_index] == 0) {
+    $avgRT_mysql_others[$dir_index] = 0;
+  }
+  else {
+    $avgRT_mysql_others[$dir_index] = $totalDT_mysql_others / $count_mysql_others[$dir_index] / 10000;
+  }
+  $count_mysql_write[$dir_index] /= $num_servers_mysql;
+  $count_mysql_read[$dir_index] *= int(100 / $mysql_sampling_ratio);
+  $count_mysql_write[$dir_index] *= int(100 / $mysql_sampling_ratio);
+  $count_mysql_others[$dir_index] *= int(100 / $mysql_sampling_ratio);
+
+  $count_mysql[$dir_index] = $count_mysql_read[$dir_index] + $count_mysql_write[$dir_index] +
+   $count_mysql_others[$dir_index];
+  $avgCount_mysql = $count_mysql[$dir_index] / $count_httpd[$dir_index];
+  $totalDT_mysql = $totalDT_mysql_read + ($totalDT_mysql_write / $num_servers_mysql) +
+   $totalDT_mysql_others;
+  $avgDT_mysql[$dir_index] = $totalDT_mysql * int(100 / $mysql_sampling_ratio) /
+   $count_httpd[$dir_index] / 10000;
+
+  print("\n");
+  printf("avgCount_mysql = %.2f\n", $avgCount_mysql);
+  printf("avgDT_mysql = %.3f(ms)\n\n", $avgDT_mysql[$dir_index]);
+
+
+  #### Process log files of CJDBC ####
+  $start4CJDBC = sprintf("%2.2d:%2.2d:%2.2d", $st_hh, $st_mm, $st_ss);
+  print("start4CJDBC = $start4CJDBC\n");
+  $end4CJDBC = sprintf("%2.2d:%2.2d:%2.2d", $et_hh, $et_mm, $et_ss);
+  print("end4CJDBC = $end4CJDBC\n");
+  system("rm tmp-filelist");
+  system("ls -d $dir_name/CJDBC*.log.gz > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  $count_cjdbc_read[$dir_index] = 0;
+  $count_cjdbc_write[$dir_index] = 0;
+  $count_cjdbc_others[$dir_index] = 0;
+  $totalDT_cjdbc_read = 0;
+  $totalDT_cjdbc_write = 0;
+  $totalDT_cjdbc_others = 0;
+  foreach $log_name (<LOG_LIST>) {
+    chop($log_name);
+    print("Before expanding: log_name = $log_name\n");
+    system("gzip -d $log_name");
+    chop($log_name);
+    chop($log_name);
+    chop($log_name);
+    print("After expanding: log_name = $log_name\n");
+    open(LOG_FILE, "$log_name");
+    $mode = 0;
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4CJDBC)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4CJDBC)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ " RT")) {
+	@parts = split(" ", $line);
+	$tmp_rt = substr($parts[4], 7);
+	if ($parts[5] eq "SELECT") {
+	  $totalDT_cjdbc_read += $tmp_rt;
+	  $count_cjdbc_read[$dir_index]++;
+	}
+	elsif (($parts[5] eq "INSERT") || ($parts[5] eq "DELETE") || ($parts[5] eq "UPDATE")) {
+	  $totalDT_cjdbc_write += $tmp_rt;
+	  $count_cjdbc_write[$dir_index]++;
+	}
+	else {
+	  $totalDT_cjdbc_others += $tmp_rt;
+	  $count_cjdbc_others[$dir_index]++;
+	}
+      }
+    }
+    close(LOG_FILE);
+    print("Before compressing: log_name = $log_name\n");
+    system("gzip $log_name");
+    print("After compressing: log_name = $log_name\n");
+  }
+  close(LOG_LIST);
+
+  if ($count_cjdbc_read[$dir_index] == 0) {
+    $dir_index++;
+    next;
+  }
+  $avgRT_cjdbc_read[$dir_index] = $totalDT_cjdbc_read / $count_cjdbc_read[$dir_index] / 1000;
+  if ($count_cjdbc_write[$dir_index] == 0) {
+    $avgRT_cjdbc_write[$dir_index] = 0;
+  }
+  else {
+    $avgRT_cjdbc_write[$dir_index] = $totalDT_cjdbc_write / $count_cjdbc_write[$dir_index] / 1000;
+  }
+  if ($count_cjdbc_others[$dir_index] == 0) {
+    $avgRT_cjdbc_others[$dir_index] = 0;
+  }
+  else {
+    $avgRT_cjdbc_others[$dir_index] = $totalDT_cjdbc_others / $count_cjdbc_others[$dir_index] / 1000;
+  }
+  $count_cjdbc_read[$dir_index] *= int(100 / $cjdbc_sampling_ratio);
+  $count_cjdbc_write[$dir_index] *= int(100 / $cjdbc_sampling_ratio);
+  $count_cjdbc_others[$dir_index] *= int(100 / $cjdbc_sampling_ratio);
+
+  $count_cjdbc[$dir_index] = $count_cjdbc_read[$dir_index] + $count_cjdbc_write[$dir_index] +
+   $count_cjdbc_others[$dir_index];
+  $avgCount_cjdbc = $count_cjdbc[$dir_index] / $count_httpd[$dir_index];
+  $totalDT_cjdbc = $totalDT_cjdbc_read + $totalDT_cjdbc_write + $totalDT_cjdbc_others;
+  $avgDT_cjdbc[$dir_index] = $totalDT_cjdbc * int(100 / $cjdbc_sampling_ratio) /
+   $count_httpd[$dir_index] / 1000;
+
+  print("\n");
+  printf("avgCount_cjdbc = %.2f\n", $avgCount_cjdbc);
+  printf("avgDT_cjdbc = %.3f(ms)\n\n", $avgDT_cjdbc[$dir_index]);
+
+
+  $dir_index++;
+}
+close(DIR_LIST);
+system("rm tmp-dirlist");
+
+
+open(OUTPUT_FILE, "> duration_time.txt");
+
+# Print the duration time of each tier
+print(OUTPUT_FILE "Average Duration Time\n");
+print(OUTPUT_FILE "Apache(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_httpd[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Tomcat(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_tomcat[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_cjdbc[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_mysql[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Apache(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_httpd[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Tomcat(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_tomcat[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_cjdbc[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgDT_mysql[$i]);
+}
+print(OUTPUT_FILE "\n\n");
+
+# Print the request count of each tier
+print(OUTPUT_FILE "Request Count\n");
+print(OUTPUT_FILE "Apache(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_httpd[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Tomcat(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_tomcat[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_cjdbc[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_mysql[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Apache(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_httpd[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "Tomcat(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_tomcat[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_cjdbc[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_mysql[$i]);
+}
+print(OUTPUT_FILE "\n\n");
+
+
+# Print response time for each kind of requests
+print(OUTPUT_FILE "Average Response Time for each kind of requests\n");
+print(OUTPUT_FILE "CJDBC_read(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_read[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_write(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_others(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_others[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_read(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_read[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_write(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_others(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_cjdbc_others[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_read(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_read[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_write(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_others(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_others[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_read(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_read[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_write(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_others(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %.3f", $avgRT_mysql_others[$i]);
+}
+print(OUTPUT_FILE "\n\n");
+
+# Print the request count for each kind of requests
+print(OUTPUT_FILE "Request Count for each kind of requests\n");
+print(OUTPUT_FILE "CJDBC_read(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_cjdbc_read[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_write(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_cjdbc_write[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_others(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_cjdbc_others[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_read(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_cjdbc_read[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_write(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_cjdbc_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "CJDBC_others(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_cjdbc_others[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_read(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_mysql_read[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_write(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_mysql_write[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_others(BO)");
+for ($i = 0; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_mysql_others[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_read(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  print(OUTPUT_FILE " $count_mysql_read[$i]");
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_write(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_mysql_write[$i]);
+}
+print(OUTPUT_FILE "\n");
+print(OUTPUT_FILE "MySQL_others(RW)");
+for ($i = 1; $i < $dir_index; $i += 2) {
+  printf(OUTPUT_FILE " %d", $count_mysql_others[$i]);
+}
+print(OUTPUT_FILE "\n\n");
+
+close(OUTPUT_FILE);
+
+
+
+
+sub change_monthname {
+  local($MM) = @_;
+  if ($MM eq "01") {
+    return("Jan");
+  }
+  elsif ($MM eq "02") {
+    return("Feb");
+  }
+  elsif ($MM eq "03") {
+    return("Mar");
+  }
+  elsif ($MM eq "04") {
+    return("Apr");
+  }
+  elsif ($MM eq "05") {
+    return("May");
+  }
+  elsif ($MM eq "06") {
+    return("Jun");
+  }
+  elsif ($MM eq "07") {
+    return("Jul");
+  }
+  elsif ($MM eq "08") {
+    return("Aug");
+  }
+  elsif ($MM eq "09") {
+    return("Sep");
+  }
+  elsif ($MM eq "10") {
+    return("Oct");
+  }
+  elsif ($MM eq "11") {
+    return("Nov");
+  }
+  elsif ($MM eq "12") {
+    return("Dec");
+  }
+  return($MM);
+}

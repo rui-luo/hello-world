@@ -1,0 +1,553 @@
+#!/usr/bin/perl
+
+# Setting for summer-time
+#
+# 0: Not summer-time
+# 1: Summer-time
+# 2: Auto-detect (This option assumes summer-time at the first trial.
+#                 If it fails, then it tries non-summer-time next.)
+$summer_time = 2;
+
+@servers = ("web_server", "servlets_server", "cjdbc_server", "db_server");
+@prefixs = ("WEB", "APP", "CJDBC", "DB");
+
+
+system("rm tmp-dirlist");
+system("ls -d 20* | grep -v '.tgz' > tmp-dirlist");
+open (DIR_LIST, "tmp-dirlist");
+$dir_index = 0;
+while (<DIR_LIST>) {
+  chop;
+  $dir_name = $_;
+
+  #### Get length of up_ramp & session_run. Get the number of workload. ####
+  open(INDEX_FILE, "$dir_name/index.html");
+  LINE: foreach $line (<INDEX_FILE>) {
+    if ($line =~ "Up ramp time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $up_ramp_time = substr($line, 33);
+      $up_ramp_time /= 1000;
+    }
+    elsif ($line =~ "Session run time in ms") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $run_time = substr($line, 33);
+      $run_time /= 1000;
+    }
+    elsif ($line =~ "Total number of clients for this experiment") {
+      for ($i = 0; $i < 5; $i++) {
+	chop($line);
+      }
+      $wload = substr($line, 45);
+      last(LINE);
+    }
+  }
+  close(INDEX_FILE);
+  print("dir = $dir_name, up_ramp_time = $up_ramp_time, run_time = $run_time, workload = $wload\n");
+  $workload[$dir_index] = $wload;
+
+  #### Get start & end time ####
+  @perf_files = ("perf.html", "stat_client0.html", "stat_client1.html", "stat_client2.html",
+		 "stat_client3.html", "stat_client4.html");
+ EXTRACT_START_TIME: foreach $perf_file (@perf_files) {
+    $found = 0;
+    open(PERF_FILE, "$dir_name/$perf_file");
+  LINE: foreach $line (<PERF_FILE>) {
+      if ($line =~ "Runtime session start") {
+	$found++;
+	$start_time = substr($line, 40, 19);
+	$st_YYYY = substr($start_time, 0, 4);
+	$st_MM = substr($start_time, 5, 2);
+	$st_DD = substr($start_time, 8, 2);
+	$st_hh = substr($start_time, 11, 2);
+	$st_mm = substr($start_time, 14, 2);
+	$st_ss = substr($start_time, 17, 2);
+      }
+      elsif ($line =~ "Down ramp start") {
+	$found++;
+	$end_time = substr($line, 34, 19);
+	$et_YYYY = substr($end_time, 0, 4);
+	$et_MM = substr($end_time, 5, 2);
+	$et_DD = substr($end_time, 8, 2);
+	$et_hh = substr($end_time, 11, 2);
+	$et_mm = substr($end_time, 14, 2);
+	$et_ss = substr($end_time, 17, 2);
+	last(LINE);
+      }
+    }
+    close(PERF_FILE);
+    if ($found == 2) {
+      last(EXTRACT_START_TIME);
+    }
+  }
+  print(" start = $st_YYYY/$st_MM/$st_DD $st_hh:$st_mm:$st_ss, ");
+  print("end = $et_YYYY/$et_MM/$et_DD $et_hh:$et_mm:$et_ss\n");
+
+  #### Read each server files ####
+ SERVER: for ($server_index = 0; $server_index <= $#servers; $server_index++) {
+    $server_name = $servers[$server_index];
+    print(" - $server_name: ");
+    system("gzip -d $dir_name/$server_name.gz");
+
+    # Set a variable for summer-time
+    $tmp_summer_time = $summer_time;
+    if ($summer_time == 2) {
+      $tmp_summer_time = 1;
+    }
+
+  RETRY_SUMMER_TIME:
+    #### Process log files of MYSQL ####
+    $start_time = sprintf("%2.2d:%2.2d:%2.2d", $st_hh + $tmp_summer_time, $st_mm, $st_ss);
+    if (($st_hh eq "23") && ($tmp_summer_time == 1)) {
+      $start_time = sprintf("00:%2.2d:%2.2d", $st_mm, $st_ss);
+    }
+    print("start_time = $start_time, ");
+    $end_time = sprintf("%2.2d:%2.2d:%2.2d", $et_hh + $tmp_summer_time, $et_mm, $et_ss);
+    if (($et_hh eq "23") && ($tmp_summer_time == 1)) {
+      $end_time = sprintf("00:%2.2d:%2.2d", $et_mm, $et_ss);
+    }
+    print("end_time = $end_time\n");
+
+    open(SERVER_FILE, "$dir_name/$server_name");
+    <SERVER_FILE>;
+    $mode = 0;
+    $count = 0;
+    $total_proc = 0.0;
+    $total_cswch = 0.0;
+    $total_cpu_used = 0.0;
+    $total_tps = 0.0;
+    $total_bread = 0.0;
+    $total_bwrtn = 0.0;
+    for ($i = 0; $i < 6; $i++) {
+      $total_rxbyte[$i] = 0.0;
+      $total_txbyte[$i] = 0.0;
+    }
+    $total_kbmemused = 0.0;
+    $total_socket = 0.0;
+  LINE: foreach $line (<SERVER_FILE>) {
+      if ($line =~ "Average") {
+	$mode++;
+	# Check whether the summer-time setting is correct or not
+	if (($mode == 1) && ($count == 0)) {
+	  if (($summer_time == 2) && ($tmp_summer_time == 1)) {
+	    print("   It looks like it was not executed during summer-time period.: dir_name = $dir_name\n");
+	    print("   Retry: ");
+	    $tmp_summer_time = 0;
+	    close(SERVER_FILE);
+	    goto(RETRY_SUMMER_TIME);
+	  }
+	  else {
+	    print("WARN: No data: file_name = $dir_name/$server_name\n");
+	    close(SERVER_FILE);
+	    system("gzip $dir_name/$server_name");
+	    next(SERVER);
+	  }
+	}
+	next(LINE);
+      }
+      if (($mode < 12) && ($line =~ "kbmemfree")) {
+	$mode = 12;
+      }
+      chop($line);
+      #skip unnecessary lines
+      if ($line eq "") {
+	next(LINE);
+      }
+      @line2 = split(/[\s\t]+/, $line);
+      $time = $line2[0];
+      if ($start_time lt $end_time) {
+	if (($time lt $start_time) || ($time ge $end_time)) {
+	  next(LINE);
+	}
+      }
+      else {
+	if (($time lt $start_time) && ($time ge $end_time)) {
+	  next(LINE);
+	}
+      }
+      
+      # proc/s
+      if ($mode == 0) {
+	if ($line =~ "proc/s") {
+	  next(LINE);
+	}
+	$total_proc += $line2[1];
+	$count++;
+      }
+      # context switch
+      elsif ($mode == 1) {
+	if ($line =~ "cswch/s") {
+	  next(LINE);
+	}
+	$total_cswch += $line2[1];
+      }
+      # CPU
+      elsif ($mode == 2) {
+	if ($line =~ "CPU") {
+	  next(LINE);
+	}
+	$total_cpu_used += $line2[2] + $line2[3] + $line2[4];
+      }
+      # Disk I/O
+      elsif ($mode == 3) {
+	if ($line =~ "bread") {
+	  next(LINE);
+	}
+	$total_tps += $line2[1];
+	$total_bread += $line2[4];
+	$total_bwrtn += $line2[5];
+      }
+      # Network
+      elsif ($mode == 4) {
+	if (($line =~ "IFACE") || ($line =~ "sit0") || ($line =~ "lo")) {
+	  next(LINE);
+	}
+	if ($line2[1] eq "eth0") {
+	  $total_rxbyte[0] += $line2[4];
+	  $total_txbyte[0] += $line2[5];
+	}
+	elsif ($line2[1] eq "eth1") {
+	  $total_rxbyte[1] += $line2[4];
+	  $total_txbyte[1] += $line2[5];
+	}
+	elsif ($line2[1] eq "eth2") {
+	  $total_rxbyte[2] += $line2[4];
+	  $total_txbyte[2] += $line2[5];
+	}
+	elsif ($line2[1] eq "eth3") {
+	  $total_rxbyte[3] += $line2[4];
+	  $total_txbyte[3] += $line2[5];
+	}
+	elsif ($line2[1] eq "eth4") {
+	  $total_rxbyte[4] += $line2[4];
+	  $total_txbyte[4] += $line2[5];
+	}
+	elsif ($line2[1] eq "eth5") {
+	  $total_rxbyte[5] += $line2[4];
+	  $total_txbyte[5] += $line2[5];
+	}
+      }
+      # Memory
+      elsif ($mode == 12) {
+	if ($line =~ "kbmemfree") {
+	  next(LINE);
+	}
+	$total_kbmemused += $line2[2];
+      }
+      # Socket
+      elsif ($mode == 13) {
+	if ($line =~ "totsck") {
+	  next(LINE);
+	}
+	$total_socket += $line2[1];
+      }
+
+    }
+    close(SERVER_FILE);
+    system("gzip $dir_name/$server_name");
+    
+    if ($count > 0) {
+      $proc{$server_name}[$dir_index] = $total_proc /= $count;
+      $cswch{$server_name}[$dir_index] = $total_cswch /= $count;
+      $cpu_used{$server_name}[$dir_index] = $total_cpu_used /= $count;
+      $tps{$server_name}[$dir_index] = $total_tps /= $count;
+      $bread{$server_name}[$dir_index] = $total_bread /= $count;
+      $bwrtn{$server_name}[$dir_index] = $total_bwrtn /= $count;
+      for ($i = 0; $i < 6; $i++) {
+	$rxbyte{$server_name}[$i][$dir_index] = $total_rxbyte[$i] /= $count;
+	$txbyte{$server_name}[$i][$dir_index] = $total_txbyte[$i] /= $count;
+      }
+      $kbmemused{$server_name}[$dir_index] = $total_kbmemused /= $count;
+      $socket{$server_name}[$dir_index] = $total_socket /= $count;
+    }
+    else {
+      print("WARN: No data: file_name = $dir_name/$server_name\n");
+    }
+  }
+
+  $dir_index++;
+}
+
+close(DIR_LIST);
+
+
+#### Write to output files ####
+print("Outputting into result files\n");
+open(OUTPUT_FILE, "> sar_summary.txt");
+print(OUTPUT_FILE "\n");
+
+#CPU usage
+print(OUTPUT_FILE "Processor usage:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $cpu_used{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $cpu_used{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+#proc/s
+print(OUTPUT_FILE "Processes created:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $proc{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $proc{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+#Context switch
+print(OUTPUT_FILE "Context switches:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $cswch{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $cswch{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+#Memory
+print(OUTPUT_FILE "Memory usage:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $kbmemused{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $kbmemused{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+#Disk
+print(OUTPUT_FILE "Disk blocks read requests:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $bread{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $bread{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+print(OUTPUT_FILE "Disk blocks write requests:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $bwrtn{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $bwrtn{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+print(OUTPUT_FILE "Disk transfers:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $tps{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %.2f", $tps{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+#Network
+print(OUTPUT_FILE "Network received bytes:\n");
+foreach $server_name (@servers) {
+  $max1_index = 0;
+  $max1_value = 0;
+  $max2_index = 0;
+  $max2_value = 0;
+  for ($j = 0; $j < 6; $j++) {
+    if ($rxbyte{$server_name}[$j][0] > $max1_value) {
+      $max2_index = $max1_index;
+      $max2_value = $max1_value;
+      $max1_index = $j;
+      $max1_value = $rxbyte{$server_name}[$j][0];
+    }
+    elsif ($rxbyte{$server_name}[$j][0] > $max2_value) {
+      $max2_index = $j;
+      $max2_value = $rxbyte{$server_name}[$j][0];
+    }
+  }
+  print(OUTPUT_FILE "$server_name(eth$max1_index)(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $rxbyte{$server_name}[$max1_index][$i]);
+  }
+  print(OUTPUT_FILE "\n");
+  if ($server_name ne "db_server") {
+    print(OUTPUT_FILE "$server_name(eth$max2_index)(BO) ");
+    for ($i = 0; $i < $dir_index; $i += 2) {
+      printf(OUTPUT_FILE " %d", $rxbyte{$server_name}[$max2_index][$i]);
+    }
+    print(OUTPUT_FILE "\n");
+  }
+}
+foreach $server_name (@servers) {
+  $max1_index = 0;
+  $max1_value = 0;
+  $max2_index = 0;
+  $max2_value = 0;
+  for ($j = 0; $j < 6; $j++) {
+    if ($rxbyte{$server_name}[$j][1] > $max1_value) {
+      $max2_index = $max1_index;
+      $max2_value = $max1_value;
+      $max1_index = $j;
+      $max1_value = $rxbyte{$server_name}[$j][1];
+    }
+    elsif ($rxbyte{$server_name}[$j][1] > $max2_value) {
+      $max2_index = $j;
+      $max2_value = $rxbyte{$server_name}[$j][1];
+    }
+  }
+  print(OUTPUT_FILE "$server_name(eth$max1_index)(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $rxbyte{$server_name}[$max1_index][$i]);
+  }
+  print(OUTPUT_FILE "\n");
+  if ($server_name ne "db_server") {
+    print(OUTPUT_FILE "$server_name(eth$max2_index)(R/W) ");
+    for ($i = 1; $i < $dir_index; $i += 2) {
+      printf(OUTPUT_FILE " %d", $rxbyte{$server_name}[$max2_index][$i]);
+    }
+    print(OUTPUT_FILE "\n");
+  }
+}
+print(OUTPUT_FILE "\n");
+
+print(OUTPUT_FILE "Network transmitted bytes:\n");
+foreach $server_name (@servers) {
+  $max1_index = 0;
+  $max1_value = 0;
+  $max2_index = 0;
+  $max2_value = 0;
+  for ($j = 0; $j < 6; $j++) {
+    if ($txbyte{$server_name}[$j][0] > $max1_value) {
+      $max2_index = $max1_index;
+      $max2_value = $max1_value;
+      $max1_index = $j;
+      $max1_value = $txbyte{$server_name}[$j][0];
+    }
+    elsif ($txbyte{$server_name}[$j][0] > $max2_value) {
+      $max2_index = $j;
+      $max2_value = $txbyte{$server_name}[$j][0];
+    }
+  }
+  print(OUTPUT_FILE "$server_name(eth$max1_index)(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $txbyte{$server_name}[$max1_index][$i]);
+  }
+  print(OUTPUT_FILE "\n");
+  if ($server_name ne "db_server") {
+    print(OUTPUT_FILE "$server_name(eth$max2_index)(BO) ");
+    for ($i = 0; $i < $dir_index; $i += 2) {
+      printf(OUTPUT_FILE " %d", $txbyte{$server_name}[$max2_index][$i]);
+    }
+    print(OUTPUT_FILE "\n");
+  }
+}
+foreach $server_name (@servers) {
+  $max1_index = 0;
+  $max1_value = 0;
+  $max2_index = 0;
+  $max2_value = 0;
+  for ($j = 0; $j < 6; $j++) {
+    if ($txbyte{$server_name}[$j][1] > $max1_value) {
+      $max2_index = $max1_index;
+      $max2_value = $max1_value;
+      $max1_index = $j;
+      $max1_value = $txbyte{$server_name}[$j][1];
+    }
+    elsif ($txbyte{$server_name}[$j][1] > $max2_value) {
+      $max2_index = $j;
+      $max2_value = $txbyte{$server_name}[$j][1];
+    }
+  }
+  print(OUTPUT_FILE "$server_name(eth$max1_index)(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $txbyte{$server_name}[$max1_index][$i]);
+  }
+  print(OUTPUT_FILE "\n");
+  if ($server_name ne "db_server") {
+    print(OUTPUT_FILE "$server_name(eth$max2_index)(R/W) ");
+    for ($i = 1; $i < $dir_index; $i += 2) {
+      printf(OUTPUT_FILE " %d", $txbyte{$server_name}[$max2_index][$i]);
+    }
+    print(OUTPUT_FILE "\n");
+  }
+}
+print(OUTPUT_FILE "\n");
+
+#Socket
+print(OUTPUT_FILE "Sockets:\n");
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(BO) ");
+  for ($i = 0; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $socket{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+foreach $server_name (@servers) {
+  print(OUTPUT_FILE "$server_name(R/W) ");
+  for ($i = 1; $i < $dir_index; $i += 2) {
+    printf(OUTPUT_FILE " %d", $socket{$server_name}[$i]);
+  }
+  print(OUTPUT_FILE "\n");
+}
+print(OUTPUT_FILE "\n");
+
+
+
+system("rm tmp-dirlist");

@@ -1,0 +1,364 @@
+#!/usr/bin/perl
+require "timelocal.pl";
+
+# Setting for summer-time
+#
+# 0: Not summer-time
+# 1: Summer-time
+# 2: Auto-detect (This option assumes summer-time at the first trial.
+#                 If it fails, then it tries non-summer-time next.)
+$summer_time = 2;
+
+
+open(OUTPUT_FILE, "> trans_count_raw.csv");
+print(OUTPUT_FILE "\"finish_time\",\"response_time\",\"table_names\",\"SQL statement\"\n");
+
+
+system("rm tmp-dirlist");
+system("ls -d 20* > tmp-dirlist");
+open (DIR_LIST, "tmp-dirlist");
+$dir_index = 0;
+while (<DIR_LIST>) {
+  chop;
+  $dir_name = $_;
+
+  #### Get start & end time ####
+  @perf_files = ("perf.html", "stat_client0.html", "stat_client1.html", "stat_client2.html",
+		 "stat_client3.html", "stat_client4.html");
+ EXTRACT_START_TIME: foreach $perf_file (@perf_files) {
+    $found = 0;
+    open(PERF_FILE, "$dir_name/$perf_file");
+  LINE: foreach $line (<PERF_FILE>) {
+      if ($line =~ "Runtime session start") {
+	$found++;
+	$start_time = substr($line, 40, 19);
+	$st_YYYY = substr($start_time, 0, 4);
+	$st_MM = substr($start_time, 5, 2);
+	$st_DD = substr($start_time, 8, 2);
+	$st_hh = substr($start_time, 11, 2);
+	$st_mm = substr($start_time, 14, 2);
+	$st_ss = substr($start_time, 17, 2);
+      }
+      elsif ($line =~ "Down ramp start") {
+	$found++;
+	$end_time = substr($line, 34, 19);
+	$et_YYYY = substr($end_time, 0, 4);
+	$et_MM = substr($end_time, 5, 2);
+	$et_DD = substr($end_time, 8, 2);
+	$et_hh = substr($end_time, 11, 2);
+	$et_mm = substr($end_time, 14, 2);
+	$et_ss = substr($end_time, 17, 2);
+	last(LINE);
+      }
+    }
+    close(PERF_FILE);
+    if ($found == 2) {
+      last(EXTRACT_START_TIME);
+    }
+  }
+  print(" start = $st_YYYY/$st_MM/$st_DD $st_hh:$st_mm:$st_ss, ");
+  print("end = $et_YYYY/$et_MM/$et_DD $et_hh:$et_mm:$et_ss\n");
+
+  # Set a variable for summer-time
+  $tmp_summer_time = $summer_time;
+  if ($summer_time == 2) {
+    $tmp_summer_time = 1;
+  }
+
+ RETRY_SUMMER_TIME:
+  #### Process log files of POSTGRES ####
+  $start4POSTGRES = sprintf("%2.2d:%2.2d:%2.2d", $st_hh + $tmp_summer_time, $st_mm, $st_ss);
+  if (($st_hh eq "23") && ($tmp_summer_time == 1)) {
+    $start4POSTGRES = sprintf("00:%2.2d:%2.2d", $st_mm, $st_ss);
+  }
+  print("start4POSTGRES = $start4POSTGRES\n");
+  $end4POSTGRES = sprintf("%2.2d:%2.2d:%2.2d", $et_hh + $tmp_summer_time, $et_mm, $et_ss);
+  if (($et_hh eq "23") && ($tmp_summer_time == 1)) {
+    $end4POSTGRES = sprintf("00:%2.2d:%2.2d", $et_mm, $et_ss);
+  }
+  print("end4POSTGRES = $end4POSTGRES\n");
+  system("rm tmp-filelist");
+#  system("ls -d $dir_name/POSTGRES*.log.gz > tmp-filelist");
+  system("ls -d $dir_name/POSTGRES1.log > tmp-filelist");
+  open(LOG_LIST, "tmp-filelist");
+  foreach $log_name (<LOG_LIST>) {
+    chop($log_name);
+#    print("Before expanding: log_name = $log_name\n");
+#    system("gzip -d $log_name");
+#    chop($log_name);
+#    chop($log_name);
+#    chop($log_name);
+    print("After expanding: log_name = $log_name\n");
+    open(LOG_FILE, "$log_name");
+    $mode = 0;
+    foreach $line (<LOG_FILE>) {
+      if (($mode == 0) && ($line =~ $start4POSTGRES)) {
+	$mode = 1;
+      }
+      if (($mode == 1) && ($line =~ $end4POSTGRES)) {
+	last;
+      }
+      if (($mode == 1) && ($line =~ "duration")) {
+	@parts = split(" ", $line);
+	if ($parts[3] eq "[PARSE]") {
+	  $count{$parts[4]}++;
+	  $duration{$parts[4]} = $parts[8];
+	}
+	elsif ($parts[3] eq "[BIND]") {
+	  $count{$parts[4]}++;
+	  $duration{$parts[4]} += $parts[8];
+	}
+	else {
+	  $count{$parts[4]}++;
+	  $duration{$parts[4]} += $parts[8];
+	  $rt = $duration{$parts[4]};
+	  @st_parts = split("FROM ", $statement{$parts[4]});
+	  @st_parts2 = split(" WHERE", $st_parts[1]);
+	  if ($count{$parts[4]} == 4) {
+	    printf(OUTPUT_FILE "\"%s\",%.3f,\"%s\",\"%s\"\n", $parts[1], $rt,
+		   $st_parts2[0], $statement{$parts[4]});
+
+	    # Count the number of SQLs in each duration times
+	    if ($rt < 0.1) {
+	      $total_count1++;
+	    }
+	    elsif ($rt < 1) {
+	      $total_count2++;
+	    }
+	    elsif ($rt < 10) {
+	      $total_count3++;
+	    }
+	    elsif ($rt < 100) {
+	      $total_count4++;
+	    }
+	    elsif ($rt < 1000) {
+	      $total_count5++;
+	    }
+	    elsif ($rt < 10000) {
+	      $total_count6++;
+	    }
+	    else {
+	      $total_count7++;
+	    }
+
+            #Add response time to calculate the approximated number of SQLs in a running queue 
+	    &add_rt($parts[0], $parts[1], $rt);
+	  }
+	  else {
+	    print("$parts[4] count=$count{$parts[4]}\n");
+	  }
+	}
+      }
+      if (($mode == 1) && ($line =~ "execute")) {
+	chop($line);
+	@parts = split(" ", $line);
+	$count{$parts[4]}++;
+	@parts2 = split("LOG:  execute <unnamed>: ", $line);
+	$statement{$parts[4]} = $parts2[1];
+      }
+    }
+    close(LOG_FILE);
+#    print("Before compressing: log_name = $log_name\n");
+#    system("gzip $log_name");
+    print("After compressing: log_name = $log_name\n");
+    # Check whether the summer-time setting is correct or not
+    if (($mode == 0) && ($summer_time == 2) && ($tmp_summer_time == 1)) {
+      print("It looks like it was not executed during summer-time period.: dir_name = $dir_name\n");
+      $tmp_summer_time = 0;
+      close(LOG_LIST);
+      goto(RETRY_SUMMER_TIME);
+    }
+  }
+  close(LOG_LIST);
+
+  $dir_index++;
+}
+close(DIR_LIST);
+system("rm tmp-dirlist");
+
+close(OUTPUT_FILE);
+
+
+# Print the number of SQLs in each duration times
+open(OUTPUT_FILE2, "> rt_count_sum.csv");
+print(OUTPUT_FILE2 "\"Response time\",\"Count\"\n");
+printf(OUTPUT_FILE2 "\"- 0.1ms\",%.1d\n", $total_count1);
+printf(OUTPUT_FILE2 "\"0.1ms - 1ms\",%.1d\n", $total_count2);
+printf(OUTPUT_FILE2 "\"1ms - 10ms\",%.1d\n", $total_count3);
+printf(OUTPUT_FILE2 "\"10ms - 100ms\",%.1d\n", $total_count4);
+printf(OUTPUT_FILE2 "\"100ms - 1s\",%.1d\n", $total_count5);
+printf(OUTPUT_FILE2 "\"1s - 10s\",%.1d\n", $total_count6);
+printf(OUTPUT_FILE2 "\"10s -\",%.1d\n", $total_count7);
+close(OUTPUT_FILE2);
+
+#Print the approximated number of SQLs in a running queue 
+open(OUTPUT_FILE, "> rt_sum.csv");
+open(OUTPUT_FILE2, "> trans_count_sum3.csv");
+print(OUTPUT_FILE "\"time\",\"rt_sum\",\"rt_sum(>=10s)\",\"rt_sum(>=1s)\",\"rt_sum(>=0.1s)\",\"rt_sum(>=0.01s)\",\"rt_sum(>=0.001s)\"\n");
+print(OUTPUT_FILE2 "\"time\",\"SQL\"\n");
+foreach $sectime (sort (keys %rt_sum_all)) {
+  ($sec,$min,$hour) = gmtime($sectime);
+  $time = sprintf("%2.2d:%2.2d:%2.2d", $hour, $min, $sec);
+  printf(OUTPUT_FILE "\"%s\",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", $time, $rt_sum_all{$sectime}/1000,
+	 $rt_sum_10000{$sectime}/1000, $rt_sum_1000{$sectime}/1000, $rt_sum_100{$sectime}/1000,
+	 $rt_sum_10{$sectime}/1000, $rt_sum_1{$sectime}/1000);
+  printf(OUTPUT_FILE2 "\"%s\",%.1d\n", $time, $count_sql{$sectime});
+}
+close(OUTPUT_FILE);
+close(OUTPUT_FILE2);
+
+
+sub add_rt {
+  local($date, $time, $rt) = @_;
+
+  ($year, $mon, $mday) = split("-", $date);
+  @bbb = split("[.]", $time);
+  ($hour, $min, $sec) = split(":", $bbb[0]);
+  $milisec = $bbb[1];
+  $sectime = &timegm(($sec, $min, $hour, $mday, $mon, $year));
+  &add_rt_all($sectime, $milisec, $rt);
+  if ($rt >= 10000) {
+    &add_rt_10000($sectime, $milisec, $rt);
+  }
+  if ($rt >= 1000) {
+    &add_rt_1000($sectime, $milisec, $rt);
+  }
+  if ($rt >= 100) {
+    &add_rt_100($sectime, $milisec, $rt);
+  }
+  if ($rt >= 10) {
+    &add_rt_10($sectime, $milisec, $rt);
+  }
+  if ($rt >= 1) {
+    &add_rt_1($sectime, $milisec, $rt);
+  }
+
+  $count_sql{$sectime}++;
+}
+
+
+sub add_rt_all {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_all{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_all{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_all($sectime, 1000, $rt);
+  }
+}
+
+sub add_rt_10000 {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_10000{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_10000{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_10000($sectime, 1000, $rt);
+  }
+}
+
+sub add_rt_1000 {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_1000{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_1000{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_1000($sectime, 1000, $rt);
+  }
+}
+
+sub add_rt_100 {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_100{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_100{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_100($sectime, 1000, $rt);
+  }
+}
+
+sub add_rt_10 {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_10{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_10{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_10($sectime, 1000, $rt);
+  }
+}
+
+sub add_rt_1 {
+  local($sectime, $milisec, $rt) = @_;
+
+  if ($milisec >= $rt) {
+    $rt_sum_1{$sectime} += $rt;
+  }
+  else {
+    $rt_sum_1{$sectime} += $milisec;
+    $rt -= $milisec;
+    $sectime -= 1;
+    &add_rt_1($sectime, 1000, $rt);
+  }
+}
+
+
+sub change_monthname {
+  local($MM) = @_;
+  if ($MM eq "01") {
+    return("Jan");
+  }
+  elsif ($MM eq "02") {
+    return("Feb");
+  }
+  elsif ($MM eq "03") {
+    return("Mar");
+  }
+  elsif ($MM eq "04") {
+    return("Apr");
+  }
+  elsif ($MM eq "05") {
+    return("May");
+  }
+  elsif ($MM eq "06") {
+    return("Jun");
+  }
+  elsif ($MM eq "07") {
+    return("Jul");
+  }
+  elsif ($MM eq "08") {
+    return("Aug");
+  }
+  elsif ($MM eq "09") {
+    return("Sep");
+  }
+  elsif ($MM eq "10") {
+    return("Oct");
+  }
+  elsif ($MM eq "11") {
+    return("Nov");
+  }
+  elsif ($MM eq "12") {
+    return("Dec");
+  }
+  return($MM);
+}
